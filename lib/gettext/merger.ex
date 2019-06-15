@@ -54,10 +54,16 @@ defmodule Gettext.Merger do
   @spec merge(PO.t(), PO.t(), String.t(), Keyword.t()) :: PO.t()
   def merge(%PO{} = old, %PO{} = new, locale, opts) when is_binary(locale) and is_list(opts) do
     opts = put_plural_forms_opt(opts, old.headers, locale)
+
+    translations_with_types = merge_translations(old.translations, new.translations, opts)
+
+    translations = Enum.map(translations_with_types, &elem(&1, 1))
     stats_acc = %{new: 0, fuzzy: 0, removed: 0, unchanged: 0}
 
-    {translations, stats} =
-      merge_translations(old.translations, new.translations, stats_acc, opts)
+    stats =
+      Enum.reduce(translations_with_types, stats_acc, fn {which, _}, stats ->
+        Map.update!(stats, which, &(&1 + 1))
+      end)
 
     removed = length(old.translations) - (length(translations) - stats.new)
     stats = Map.put(stats, :removed, removed)
@@ -71,39 +77,23 @@ defmodule Gettext.Merger do
     }
   end
 
-  defp merge_translations(old, new, stats_acc, opts) do
+  defp merge_translations(old, new, opts) do
     fuzzy? = Keyword.fetch!(opts, :fuzzy)
     fuzzy_threshold = Keyword.fetch!(opts, :fuzzy_threshold)
     plural_forms = Keyword.fetch!(opts, :plural_forms)
 
     old = Map.new(old, &{PO.Translations.key(&1), &1})
 
-    {translations, stats} =
-      Enum.reduce(new, {[], stats_acc}, fn t, {translations, stats} ->
-        key = PO.Translations.key(t)
-        t = adjust_number_of_plural_forms(t, plural_forms)
+    Enum.map(new, fn t ->
+      key = PO.Translations.key(t)
+      t = adjust_number_of_plural_forms(t, plural_forms)
 
-        case Map.fetch(old, key) do
-          {:ok, exact_match} ->
-            translation = merge_two_translations(exact_match, t)
-            {[translation | translations], inc_stat(stats, :unchanged)}
-
-          :error when fuzzy? ->
-            case maybe_merge_fuzzy(t, old, key, fuzzy_threshold) do
-              {:fuzzy, t} -> {[t | translations], inc_stat(stats, :fuzzy)}
-              {:nomatch, t} -> {[t | translations], inc_stat(stats, :new)}
-            end
-
-          :error ->
-            {[t | translations], inc_stat(stats, :new)}
-        end
-      end)
-
-    {Enum.reverse(translations), stats}
-  end
-
-  defp inc_stat(stats, which) do
-    Map.update!(stats, which, fn num -> num + 1 end)
+      case Map.fetch(old, key) do
+        {:ok, exact_match} -> {:unchanged, merge_two_translations(exact_match, t)}
+        :error when fuzzy? -> maybe_merge_fuzzy(t, old, key, fuzzy_threshold)
+        :error -> {:new, t}
+      end
+    end)
   end
 
   defp adjust_number_of_plural_forms(%PluralTranslation{} = t, plural_forms)
@@ -120,7 +110,7 @@ defmodule Gettext.Merger do
     if matched = find_fuzzy_match(old, key, fuzzy_threshold) do
       {:fuzzy, Fuzzy.merge(t, matched)}
     else
-      {:nomatch, t}
+      {:new, t}
     end
   end
 
