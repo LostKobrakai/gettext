@@ -52,9 +52,8 @@ defmodule Gettext.Merger do
   @spec merge(PO.t(), PO.t(), String.t(), Keyword.t()) :: {PO.t(), map()}
   def merge(%PO{} = old, %PO{} = new, locale, opts) when is_binary(locale) and is_list(opts) do
     opts = put_plural_forms_opt(opts, old.headers, locale)
-    stats = %{new: 0, exact_matches: 0, fuzzy_matches: 0, removed: 0}
 
-    {translations, stats} = merge_translations(old.translations, new.translations, opts, stats)
+    {translations, stats} = merge_translations(old.translations, new.translations, opts)
 
     po = %PO{
       top_of_the_file_comments: old.top_of_the_file_comments,
@@ -66,39 +65,46 @@ defmodule Gettext.Merger do
     {po, stats}
   end
 
-  defp merge_translations(old, new, opts, stats) do
+  defp merge_translations(old, new, opts) do
     fuzzy? = Keyword.fetch!(opts, :fuzzy)
     fuzzy_threshold = Keyword.fetch!(opts, :fuzzy_threshold)
     plural_forms = Keyword.fetch!(opts, :plural_forms)
 
     old = Map.new(old, &{PO.Translations.key(&1), &1})
 
+    stats = %{
+      new: 0,
+      exact_matches: 0,
+      fuzzy_matches: 0,
+      removed: 0
+    }
+
     {translations, {stats, unused}} =
       Enum.map_reduce(new, {stats, _unused = old}, fn t, {stats_acc, unused} ->
         key = PO.Translations.key(t)
         t = adjust_number_of_plural_forms(t, plural_forms)
 
-        case Map.fetch(old, key) do
-          {:ok, exact_match} ->
-            stats = update_in(stats_acc.exact_matches, &(&1 + 1))
-            {merge_two_translations(exact_match, t), {stats, Map.delete(unused, key)}}
+        {t, type, key} =
+          case Map.fetch(old, key) do
+            {:ok, exact_match} ->
+              {merge_two_translations(exact_match, t), :exact_matches, key}
 
-          :error when fuzzy? ->
-            case maybe_merge_fuzzy(t, old, key, fuzzy_threshold) do
-              {:matched, match, fuzzy_merged} ->
-                stats_acc = update_in(stats_acc.fuzzy_matches, &(&1 + 1))
-                unused = Map.delete(unused, PO.Translations.key(match))
-                {fuzzy_merged, {stats_acc, unused}}
+            :error when fuzzy? ->
+              case maybe_merge_fuzzy(t, old, key, fuzzy_threshold) do
+                {:matched, match, fuzzy_merged} ->
+                  {fuzzy_merged, :fuzzy_matches, PO.Translations.key(match)}
 
-              :nomatch ->
-                stats_acc = update_in(stats_acc.new, &(&1 + 1))
-                {t, {stats_acc, unused}}
-            end
+                :nomatch ->
+                  {t, :new, nil}
+              end
 
-          :error ->
-            stats_acc = update_in(stats_acc.new, &(&1 + 1))
-            {t, {stats_acc, unused}}
-        end
+            :error ->
+              {t, :new, nil}
+          end
+
+        unused = if key, do: Map.delete(unused, key), else: unused
+        stats_acc = Map.update!(stats_acc, type, &(&1 + 1))
+        {t, {stats_acc, unused}}
       end)
 
     {translations, put_in(stats.removed, map_size(unused))}
